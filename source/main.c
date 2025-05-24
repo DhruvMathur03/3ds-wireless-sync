@@ -14,6 +14,37 @@
 #define BUF_SIZE        1024
 #define SOC_ALIGN       0x1000        // define locally (16 KB align)
 #define SOC_BUFFERSIZE  0x100000      // 1 MB for sockets
+#define MAX_FILES 	256
+#define NAME_LEN	64
+
+static char files[MAX_FILES][NAME_LEN];
+static int file_cnt = 0;
+
+static void scan_and_print(void)
+{
+    file_cnt = 0;
+    consoleClear();
+    printf("3DS-Sync	(START=quit, Y=refresh)\n\n");
+
+    DIR *d = opendir("sdmc:/3ds_sync");
+    if (!d) {
+	printf("[sdmc:/3ds_sync not found]\n");
+	return;
+    }
+    
+    struct dirent *ent;
+    while ((ent = readdir(d)) && file_cnt < MAX_FILES) {
+	if (ent->d_type == DT_REG) {
+	    strncpy(files[file_cnt], ent->d_name, NAME_LEN - 1);
+	    files[file_cnt][NAME_LEN - 1] = 0;
+	    printf("%s\n", files[file_cnt]);
+	    ++file_cnt;
+	}
+    }
+    closedir(d);
+
+    if (file_cnt == 0) printf("[folder empty]\n");
+}
 
 static void start_server(void)
 {
@@ -47,44 +78,31 @@ static void start_server(void)
            (addr.sin_addr.s_addr >>  8) & 0xFF,
            (addr.sin_addr.s_addr      ) & 0xFF,
            PORT);
-    printf("Press START to quit.\n\n");
 
     while (aptMainLoop()) {
         hidScanInput();
-        if (hidKeysDown() & KEY_START) break;
+	u32 kd = hidKeysDown();
+        if (kd & KEY_START) break;
+	if (kd & KEY_Y) scan_and_print();    
 
         int client = accept(server, NULL, NULL);
-        if (client < 0) {
-            /* EAGAIN / EWOULDBLOCK just means no one connected yet */
-            if (errno == EAGAIN || errno == EWOULDBLOCK)
-                continue;
+        if (client >= 0) { 
+	    for (int i = 0; i < file_cnt; ++i) {
+		send(client, files[i], strlen(files[i]), 0);
+		send(client, "\r\n", 2, 0);
+	    }
+	    close(client);
+	} else if (errno != EAGAIN && errno != EWOULDBLOCK) {
             printf("accept() err %d\n", errno);
-            break;
+	    svcSleepThread(5 * 1000 * 1000 * 1000LL);
         }
-
-        DIR *d = opendir("sdmc:/3ds_sync");
-        if (!d) {
-            const char *msg = "ERROR: sdmc:/3ds_sync not found\r\n";
-            send(client, msg, strlen(msg), 0);
-        } else {
-            struct dirent *ent;
-            char line[BUF_SIZE];
-            while ((ent = readdir(d)) != NULL) {
-                if (ent->d_type == DT_REG) {
-                    snprintf(line, sizeof(line), "%s\r\n", ent->d_name);
-                    send(client, line, strlen(line), 0);
-                }
-            }
-            closedir(d);
-        }
-        close(client);
     }
-
     close(server);
 }
 
 int main(void)
 {
+
     gfxInitDefault();
     consoleInit(GFX_TOP, NULL);
 
@@ -99,11 +117,12 @@ int main(void)
     if (R_FAILED(rc)) {
         printf("socInit failed: 0x%08lX\n", rc);
         free(socBuf);
-        gfxExit();
+	gfxExit();
         return 1;
     }
 
     printf("Starting file‑listing server …\n");
+    scan_and_print();
     start_server();
 
     socExit();
@@ -111,4 +130,3 @@ int main(void)
     gfxExit();
     return 0;
 }
-
