@@ -88,14 +88,15 @@ static int start_server(void)
     return server;
 }
 
-static void handle_client(int client) {
-    for (int i = 0; i < item_cnt; ++i) {
-	if (!items[i].isDir) {
-	    send(client, items[i].name, strlen(items[i].name), 0);
-	    send(client, "\r\n", 2, 0);
-	}
+static bool send_all(int sock, const void *buf, size_t len) {
+    const u8 *p = buf;
+    while (len) {
+	int n = send(sock, p, len, 0);
+	if (n <= 0) return false;
+	p += n;
+	len -= n;
     }
-    close(client);
+    return true;
 }
 
 int main(void) {
@@ -120,11 +121,19 @@ int main(void) {
     u32 ip = gethostid();
     refresh_dir();
     print_list(ip);
+    int pendingClient = -1;
     bool ref = true;
-    while (aptMainLoop()) {
-	int client = accept(server, NULL, NULL);
-	if (client >= 0) handle_client(client);
 
+    while (aptMainLoop()) {
+	if (pendingClient < 0) { 
+	    pendingClient = accept(server, NULL, NULL);
+	    if (pendingClient >= 0) {
+		int fl = fcntl(pendingClient, F_GETFL, 0);
+		fcntl(pendingClient, F_SETFL, fl & ~O_NONBLOCK);
+
+		printf("\nClient connected - highlight file and press A to send\n");
+	    }
+	}
 	hidScanInput();
 	u32 kdown = hidKeysDown();
 
@@ -133,21 +142,55 @@ int main(void) {
 	if (kdown & KEY_UP) { if (cursor) --cursor; ref = true; }
 	if (kdown & KEY_DOWN) { if (cursor < item_cnt-1) ++cursor; ref = true; }
 
-	// Logic for going in directory
-	if (kdown & KEY_A && items[cursor].isDir) {
-	    if (strcmp(items[cursor].name, "..") == 0) {
-		size_t len = strlen(cwd);
-		if (len >0 && cwd[len - 1] == '/') cwd[len - 1] = '\0';
-		char *slash = strrchr(cwd, '/');
-		if (slash) slash[1] = '\0';
-	    } else {
-		if (strlen(cwd) + strlen(items[cursor].name) + 2 < sizeof(cwd)) {
-		    strcat(cwd, items[cursor].name);
-		    strcat(cwd, "/");
+	// Logic for Pressing Key A
+	if (kdown & KEY_A) {
+	    if (items[cursor].isDir) {
+		if (strcmp(items[cursor].name, "..") == 0) {
+		    size_t len = strlen(cwd);
+		    if (len >0 && cwd[len - 1] == '/') cwd[len - 1] = '\0';
+		    char *slash = strrchr(cwd, '/');
+		    if (slash) slash[1] = '\0';
+		} else {
+		    if (strlen(cwd) + strlen(items[cursor].name) + 2 < sizeof(cwd)) {
+			strcat(cwd, items[cursor].name);
+			strcat(cwd, "/");
+		    }
 		}
+		refresh_dir();
+		ref = true;
+	    } else if (pendingClient >= 0) {
+		char path[512];
+		snprintf(path, sizeof(path), "%s%s", cwd, items[cursor].name);
+
+		FILE *fp = fopen(path, "rb");
+		if (!fp) {
+		    send(pendingClient, "ERROR\n", 4, 0);
+		} else {
+		    fseek(fp, 0, SEEK_END);
+		    u32 size = ftell(fp);
+		    fseek(fp, 0, SEEK_SET);
+
+		    char hdr[128];
+		    snprintf(hdr, sizeof(hdr), "FILE %s %u\n", items[cursor].name, size);
+		    if (!send_all(pendingClient, hdr, strlen(hdr))) goto send_err;
+
+		    char buf[BUF_SIZE];
+		    size_t r;
+		    while ((r = fread(buf, 1, sizeof(buf), fp)) > 0)
+			if (!send_all(pendingClient, buf, r)) goto send_err;
+
+		    printf("\nSent %s (%u bytes)\n", items[cursor].name, size);
+		    goto send_done;
+
+		    send_err:
+		    printf("\n Transfer aborted (network error)\n");
+
+		    send_done:
+		    fclose(fp);
+		}
+		close(pendingClient);
+		pendingClient = -1;
 	    }
-	    refresh_dir();
-	    ref = true;
 	}
 	// Logic for going up directory
 	if (kdown & KEY_B) {
@@ -166,6 +209,7 @@ int main(void) {
 	svcSleepThread(5 * 1000 * 1000LL);
     }
     
+    if (pendingClient >= 0) close(pendingClient);
     close(server);
     socExit();
     free(socBuf);
