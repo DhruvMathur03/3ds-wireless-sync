@@ -16,6 +16,7 @@
 #define SOC_BUFFERSIZE  0x100000      // 1 MB for sockets
 #define MAX_ITEMS 	256
 #define NAME_LEN	96
+#define ROWS_VISIBLE	25
 
 typedef struct { char name[NAME_LEN]; bool isDir; } DirEntry;
 
@@ -24,9 +25,11 @@ static int item_cnt = 0;
 static int cursor = 0;
 static char cwd[256] = "sdmc:/";
 const size_t ROOT_LEN = 6;
+static int viewStart = 0;
 
 static void refresh_dir(void) {
     item_cnt = 0;
+    viewStart = 0;
     DIR *d = opendir(cwd);
     if (!d) return;
 
@@ -55,12 +58,12 @@ static void print_list(u32 ip) {
            (ip>>8)&255, ip&255, PORT);
     printf("cwd: %s\n\n", cwd);
 
-    for (int i = 0; i < item_cnt; ++i) {
-        if (i == cursor) printf(" > ");
-        else printf("   ");
-        printf("%s%s\n",
-               items[i].name,
-               items[i].isDir ? "/" : "");
+    for (int i = 0; i < ROWS_VISIBLE && (viewStart + i) < item_cnt; ++i) {
+	int idx = viewStart + i;
+        printf("%c %s%s\n",
+		(idx == cursor ? '>' : ' '),
+		items[i].name,
+		items[i].isDir ? "/" : "");
     }
 }
 
@@ -139,8 +142,16 @@ int main(void) {
 
 	if (kdown & KEY_START) break;
 
-	if (kdown & KEY_UP) { if (cursor) --cursor; ref = true; }
-	if (kdown & KEY_DOWN) { if (cursor < item_cnt-1) ++cursor; ref = true; }
+	if (kdown & KEY_UP) { 
+	    if (cursor) --cursor; 
+	    ref = true;
+	    if (cursor < viewStart) viewStart = cursor;
+	}
+	if (kdown & KEY_DOWN) { 
+	    if (cursor < item_cnt-1) ++cursor;
+	    ref = true;
+	    if (cursor >= viewStart + ROWS_VISIBLE) viewStart = cursor - ROWS_VISIBLE + 1;
+	}
 
 	// Logic for Pressing Key A
 	if (kdown & KEY_A) {
